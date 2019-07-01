@@ -37,7 +37,7 @@ public class WifiService extends Service {
 
     @Override
     public void onDestroy() {
-        mTracker.unregister(getApplicationContext());
+        mTracker.unregister();
         mTracker = null;
 
         super.onDestroy();

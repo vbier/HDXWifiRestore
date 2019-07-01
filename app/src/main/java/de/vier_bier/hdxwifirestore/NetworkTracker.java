@@ -1,80 +1,165 @@
 package de.vier_bier.hdxwifirestore;
 
-import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiManager;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import java.util.List;
 
-public class NetworkTracker extends BroadcastReceiver {
+class NetworkTracker {
     private static final String TAG = "HDXWR-NetworkTracker";
+    private final Handler requestHandler = new Handler(Looper.getMainLooper());
+
     private ConnectivityManager cm;
+    private ConnectivityManager.NetworkCallback cb;
     private WifiManager wm;
+    private State state;
+    private int netId = -1;
+    private int count = 0;
 
     private String ssid;
     private String pass;
 
-    public NetworkTracker(Context context) {
+    NetworkTracker(Context context) {
         cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
         wm = (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
 
-        final IntentFilter intentFilter = new IntentFilter();
-        intentFilter.addAction(ConnectivityManager.CONNECTIVITY_ACTION);
+        cb = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) {
+                if (network != null) {
+                    Log.d(TAG, "network available: " + network);
+                }
 
-        Log.d(TAG, "registering network receiver...");
-        context.registerReceiver(this, intentFilter);
+                setState(State.CONNECTED);
+            }
+
+            @Override
+            public void onLost(Network network) {
+                if (network != null) {
+                    Log.d(TAG, "lost network: " + network);
+                }
+
+                if (wm.isWifiEnabled()) {
+                    Log.d(TAG, "wifi is still available, removing...");
+                    setState(State.REMOVE_NETWORK);
+                } else {
+                    setState(State.ENABLE_WIFI);
+                }
+
+                process();
+            }
+        };
     }
 
-    public void unregister(Context context) {
+    void unregister() {
         Log.d(TAG, "unregistering network receiver...");
-        context.unregisterReceiver(this);
+        cm.unregisterNetworkCallback(cb);
     }
 
-    @Override
-    public void onReceive(Context context, Intent intent) {
-        if (ssid == null) return;
-
-        try {
-            checkWifi();
-        } catch (InterruptedException e) {
-            Log.w(TAG, "interrupted while waiting for wifi", e);
+    private synchronized void setState(State newState) {
+        if (newState != state) {
+            state = newState;
+            count = 0;
+            Log.d(TAG, "new state: " + state.name());
         }
     }
 
-    private synchronized void checkWifi() throws InterruptedException {
-        if (isConnected()) {
-            Log.d(TAG, "network connected");
+    private synchronized void process() {
+        Log.v(TAG, "process: status = " + state.name() + ", count=" + count);
+
+        State oldState = state;
+        switch (state) {
+            case REMOVE_NETWORK: {
+                if (removeNetwork()) {
+                    setState(State.WAIT_NETWORK_REMOVED);
+                }
+                break;
+            }
+            case WAIT_NETWORK_REMOVED:
+                if (getNetworkId() == -1) {
+                    setState(State.DISABLE_WIFI);
+                }
+                break;
+            case DISABLE_WIFI: {
+                if (!wm.isWifiEnabled() || disableWifi()) {
+                    setState(State.WAIT_WIFI_DISABLED);
+                }
+                break;
+            }
+            case WAIT_WIFI_DISABLED: {
+                if (!wm.isWifiEnabled()) {
+                    setState(State.ENABLE_WIFI);
+                }
+                break;
+            }
+            case ENABLE_WIFI: {
+                if (wm.isWifiEnabled() || enableWifi()) {
+                    setState(State.WAIT_WIFI_ENABLED);
+                }
+                break;
+            }
+            case WAIT_WIFI_ENABLED: {
+                if (wm.isWifiEnabled()) {
+                    setState(State.ADD_NETWORK);
+                }
+                break;
+            }
+            case ADD_NETWORK: {
+                if (getNetworkId() != -1 || createNetwork() != -1) {
+                    setState(State.WAIT_NETWORK_ADDED);
+                }
+                break;
+            }
+            case WAIT_NETWORK_ADDED: {
+                if (getNetworkId() != -1) {
+                    setState(State.ENABLE_NETWORK);
+                }
+                break;
+            }
+            case ENABLE_NETWORK: {
+                if (enableNetwork()) {
+                    setState(State.WAIT_NETWORK_ENABLED);
+                }
+                break;
+            }
+            case CONNECTED: return;
+        }
+
+        if (state != oldState) {
+            process();
+        } else if (count <= 15) {
+            count++;
+            requestHandler.postDelayed(this::process, 2000);
         } else {
-            Log.d(TAG, "network disconnected. waiting ten seconds for wifi to come up...");
-            Thread.sleep(10000);
-
-            if (isConnected()) {
-                Log.d(TAG, "network connected after waiting period.");
-                return;
-            }
-
-            if (!wm.isWifiEnabled()) {
-                Log.d(TAG, "wifi enabled: " + enableWifi());
-            }
-
-            Log.d(TAG, "network removed: " + removeNetwork());
-            int netId = createNetwork();
-            Log.d(TAG, "network added: " + netId);
-
-            if (netId != -1 && wm.getConnectionInfo().getNetworkId() == -1) {
-                Log.d(TAG, "network enabled: " + wm.enableNetwork(netId, true));
-            }
+            Log.w(TAG, state.name() + " failed!");
+            cb.onLost(null);
         }
     }
 
-    private boolean isConnected() {
-        return cm != null && cm.getActiveNetworkInfo() != null
-                && cm.getActiveNetworkInfo().isConnected();
+    private boolean disableWifi() {
+        boolean stat = wm.setWifiEnabled(false);
+        Log.d(TAG, "disabled wifi: " + stat);
+        return stat;
+    }
+
+    private boolean enableWifi() {
+        boolean stat = wm.setWifiEnabled(true);
+        Log.d(TAG, "enabled wifi: " + stat);
+        return stat;
+    }
+
+    private boolean enableNetwork() {
+        boolean stat = wm.enableNetwork(netId, true);
+        Log.d(TAG, "enabled network: " + stat);
+        return stat;
     }
 
     private int createNetwork() {
@@ -83,37 +168,59 @@ public class NetworkTracker extends BroadcastReceiver {
         conf.preSharedKey = pass;
         conf.providerFriendlyName = "created by DX Wifi Restore";
 
-        Log.d(TAG, "adding network...");
-        return wm.addNetwork(conf);
-    }
+        int netId = wm.addNetwork(conf);
+        Log.d(TAG, "added network: id=" + netId);
 
-    private boolean enableWifi() {
-        return wm.setWifiEnabled(true);
+        if (netId != -1) {
+            this.netId = netId;
+        }
+
+        return netId;
     }
 
     private boolean removeNetwork() {
         List<WifiConfiguration> configs = wm.getConfiguredNetworks();
-        Log.d(TAG, (configs == null ? 0 : configs.size()) + " configured networks found");
+        Log.v(TAG, (configs == null ? 0 : configs.size()) + " configured networks found");
 
         if (configs != null) {
             for (WifiConfiguration config : configs) {
                 if (ssid.equals(config.SSID)) {
-                    Log.d(TAG, "removing network...");
-                    return wm.removeNetwork(config.networkId);
+                    boolean stat = wm.removeNetwork(config.networkId);
+                    Log.d(TAG, "removed network: " + stat);
+                    return stat;
                 }
             }
         }
-        return false;
+        return true;
     }
 
-    public void setConnection(String ssid, String pass) {
+
+    private int getNetworkId() {
+        List<WifiConfiguration> configs = wm.getConfiguredNetworks();
+        if (configs != null) {
+            for (WifiConfiguration config : configs) {
+                if (ssid.equals(config.SSID)) {
+                    return config.networkId;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    void setConnection(String ssid, String pass) {
         this.ssid = "\"" + ssid + "\"";
         this.pass = "\"" + pass + "\"";
+        netId = getNetworkId();
 
-        try {
-            checkWifi();
-        } catch (InterruptedException e) {
-            Log.w(TAG, "interrupted while waiting for wifi", e);
-        }
+        Log.d(TAG, "registering network receiver...");
+        cm.registerNetworkCallback(
+                new NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),
+                cb);
+    }
+
+    enum State {
+        REMOVE_NETWORK, WAIT_NETWORK_REMOVED, DISABLE_WIFI, WAIT_WIFI_DISABLED, ENABLE_WIFI, WAIT_WIFI_ENABLED,
+        ADD_NETWORK, WAIT_NETWORK_ADDED, ENABLE_NETWORK, WAIT_NETWORK_ENABLED, CONNECTED
     }
 }

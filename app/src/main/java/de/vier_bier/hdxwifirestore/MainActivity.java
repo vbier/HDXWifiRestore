@@ -8,7 +8,6 @@ import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
-import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.TextView;
@@ -26,18 +25,12 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         final Button button = findViewById(R.id.button);
-        button.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                startService();
-            }
-        });
+        button.setOnClickListener(v -> startService());
 
         final Button button2 = findViewById(R.id.button2);
-        button2.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                finishAndRemoveTask();
-                System.exit(0);
-            }
+        button2.setOnClickListener(v -> {
+            finishAndRemoveTask();
+            System.exit(0);
         });
 
         final SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(getBaseContext());
